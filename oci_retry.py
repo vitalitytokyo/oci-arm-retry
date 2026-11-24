@@ -232,7 +232,7 @@ def main():
         print("Minecraft server already exists.")
         return
 
-    subnet_id = create_vcn_and_subnet()
+    subnet_id = "ocid1.subnet.oc1.eu-frankfurt-1.aaaaaaaamq7nyha6lmmtrhxdqtvl2gnkb3sbwcjqx2mndlb2deiwhjctsnxq"
     image_id = get_ubuntu_arm_image()
     attempt = 0
 
