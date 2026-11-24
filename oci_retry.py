@@ -12,12 +12,12 @@ import datetime
 # ╚══════════════════════════════════════════════════════╝
 
 # ─── Configuration ───────────────────────────────────────
-INSTANCE_NAME = "arm-server"
-UBUNTU_VERSION = "24.04"  # OS for the new instance: "24.04" (default), "26.04" or "22.04"
+INSTANCE_NAME = "minecraft-server"
+UBUNTU_VERSION = "24.04"
 ARM_OCPUS = 2
 ARM_MEMORY_IN_GBS = 12
 BOOT_VOLUME_SIZE_IN_GBS = 100
-RETRY_INTERVAL = 90  # seconds
+RETRY_INTERVAL = 300
 # ────────────────────────────────────────────────────────
 
 # ─── OCI Authentication ──────────────────────────────────
@@ -64,10 +64,10 @@ def load_ssh_public_key():
 SSH_PUBLIC_KEY = load_ssh_public_key()
 
 
-def get_availability_domain():
+def get_availability_domains():
     identity = oci.identity.IdentityClient(config)
     ads = identity.list_availability_domains(COMPARTMENT_ID).data
-    return ads[0].name
+    return [ad.name for ad in ads]
 
 
 def get_ubuntu_arm_image():
@@ -139,7 +139,7 @@ def create_vcn_and_subnet():
         if security_lists:
             existing_egress = security_lists[0].egress_security_rules
             new_ingress = []
-            for port in [22, 80, 443]:
+            for port in [22]:
                 new_ingress.append(
                     oci.core.models.IngressSecurityRule(
                         protocol="6",
@@ -208,39 +208,66 @@ def try_create_instance(subnet_id, ad_name, image_id):
 
 
 def main():
-    print("Initializing network configuration...")
+    compute = oci.core.ComputeClient(config)
+
+    ads = get_availability_domains()
+    if not ads:
+        raise SystemExit("No availability domains found")
+
+    def existing_instance():
+        instances = oci.pagination.list_call_get_all_results(
+            compute.list_instances,
+            COMPARTMENT_ID,
+            display_name=INSTANCE_NAME
+        ).data
+
+        return next(
+            (i for i in instances
+             if i.lifecycle_state not in
+             ["TERMINATED", "TERMINATING"]),
+            None
+        )
+
+    if existing_instance():
+        print("Minecraft server already exists.")
+        return
+
     subnet_id = create_vcn_and_subnet()
-
-    print("Fetching availability domain...")
-    ad_name = get_availability_domain()
-    print(f"AD: {ad_name}")
-
-    print(f"Fetching Ubuntu {UBUNTU_VERSION} ARM image...")
     image_id = get_ubuntu_arm_image()
-    print(f"Image ID: {image_id}")
-
     attempt = 0
+
     while True:
-        attempt += 1
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"\n[{now}] Attempt #{attempt} to create instance...")
+        for ad_name in ads:
+            if existing_instance():
+                print("Minecraft server already exists.")
+                return
 
-        try:
-            instance = try_create_instance(subnet_id, ad_name, image_id)
-            print(f"\n✅ Success! Instance created")
-            print(f"   ID: {instance.id}")
-            print(f"   State: {instance.lifecycle_state}")
-            print(f"   Check Oracle Cloud Console for the public IP")
-            break
-        except oci.exceptions.ServiceError as e:
-            if "Out of host capacity" in str(e) or "capacity" in str(e).lower():
-                print(f"❌ Out of capacity, retrying...")
-            else:
-                print(f"❌ API error: {e.message}, retrying...")
-        except Exception as e:
-            print(f"⚠️ Network timeout or other error, retrying... ({type(e).__name__})")
+            attempt += 1
+            print(f"Attempt {attempt}: {ad_name}")
 
-        time.sleep(RETRY_INTERVAL)
+            try:
+                instance = try_create_instance(
+                    subnet_id, ad_name, image_id
+                )
+
+                print("SUCCESS! Instance created.")
+                print(f"ID: {instance.id}")
+                return
+
+            except oci.exceptions.ServiceError as e:
+                message = str(e.message).lower()
+
+                if "out of host capacity" in message:
+                    print("No capacity available.")
+                elif e.status == 429:
+                    print("Rate limited. Waiting.")
+                    time.sleep(600)
+                else:
+                    raise SystemExit(
+                        f"Stopped: {e.message}"
+                    )
+
+            time.sleep(RETRY_INTERVAL)
 
 
 if __name__ == "__main__":
